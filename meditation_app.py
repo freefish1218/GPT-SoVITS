@@ -428,35 +428,84 @@ class MeditationApp:
         how_to_cut: str,
         sovits_model: str,
         gpt_model: str,
-        progress=gr.Progress()
+        progress=None
     ):
         """生成冥想音频"""
         
+        print("\n" + "="*60)
         print("=== 开始生成冥想音频 ===")
-        print(f"输入参数: text长度={len(text) if text else 0}, ref_audio={ref_audio}, ref_text长度={len(ref_text) if ref_text else 0}")
-        print(f"预设={preset_name}, speed={speed}, top_k={top_k}, top_p={top_p}, temperature={temperature}")
-        print(f"pause_second={pause_second}, text_language={text_language}, ref_language={ref_language}")
-        print(f"how_to_cut={how_to_cut}, sovits_model={sovits_model}, gpt_model={gpt_model}")
+        print("="*60)
+        print(f"[DEBUG] 函数被调用，所有参数:")
+        print(f"  - text长度: {len(text) if text else 0}")
+        print(f"  - text内容: {text[:100] if text else 'None'}...")
+        print(f"  - ref_audio: {ref_audio}")
+        print(f"  - ref_audio类型: {type(ref_audio)}")
+        print(f"  - ref_text: {ref_text}")
+        print(f"  - preset_name: {preset_name}")
+        print(f"  - speed: {speed}")
+        print(f"  - top_k: {top_k}")
+        print(f"  - top_p: {top_p}")
+        print(f"  - temperature: {temperature}")
+        print(f"  - pause_second: {pause_second}")
+        print(f"  - text_language: {text_language}")
+        print(f"  - ref_language: {ref_language}")
+        print(f"  - how_to_cut: {how_to_cut}")
+        print(f"  - sovits_model: {sovits_model}")
+        print(f"  - gpt_model: {gpt_model}")
+        print("="*60)
         
         # 参数验证
         if not text:
-            print("错误: 未输入文本")
+            print("[ERROR] 未输入文本")
             gr.Warning("请输入冥想引导文本")
             return None
         
         if not ref_audio:
-            print("错误: 未上传参考音频")
+            print("[ERROR] 未上传参考音频")
             gr.Warning("请上传参考音频")
             return None
         
         if not ref_text:
-            print("错误: 未输入参考文本")
+            print("[ERROR] 未输入参考文本")
             gr.Warning("请输入参考音频的文本")
             return None
         
+        # 检查音频文件
+        import os
+        if isinstance(ref_audio, str):
+            if not os.path.exists(ref_audio):
+                print(f"[ERROR] 音频文件不存在: {ref_audio}")
+                gr.Error(f"音频文件不存在: {ref_audio}")
+                return None
+            print(f"[DEBUG] 音频文件存在: {ref_audio}")
+            print(f"[DEBUG] 音频文件大小: {os.path.getsize(ref_audio)} bytes")
+            
+            # 如果是MP3，尝试转换为WAV
+            if ref_audio.lower().endswith('.mp3'):
+                print("[INFO] 检测到MP3格式，正在转换为WAV...")
+                try:
+                    import librosa
+                    import soundfile as sf
+                    import tempfile
+                    
+                    # 读取MP3
+                    audio_data, sr = librosa.load(ref_audio, sr=None)
+                    
+                    # 创建临时WAV文件
+                    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_wav:
+                        wav_path = tmp_wav.name
+                        sf.write(wav_path, audio_data, sr)
+                        print(f"[INFO] MP3已转换为WAV: {wav_path}")
+                        ref_audio = wav_path
+                except Exception as e:
+                    print(f"[ERROR] MP3转换失败: {e}")
+                    gr.Error(f"音频格式转换失败: {e}")
+                    return None
+        
         try:
             # 显示进度
-            progress(0.1, desc="正在加载模型...")
+            if progress:
+                progress(0.1, desc="正在加载模型...")
             
             # 更新模型（如果需要）
             if sovits_model and sovits_model != self.current_sovits:
@@ -469,8 +518,15 @@ class MeditationApp:
                 change_gpt_weights(gpt_model)
                 self.current_gpt = gpt_model
             
-            progress(0.3, desc="正在生成音频...")
-            print("开始调用get_tts_wav函数...")
+            if progress:
+                progress(0.3, desc="正在生成音频...")
+            print("[DEBUG] 开始调用get_tts_wav函数...")
+            print(f"[DEBUG] 调用参数:")
+            print(f"  - ref_wav_path: {ref_audio}")
+            print(f"  - prompt_text: {ref_text}")
+            print(f"  - prompt_language: {ref_language}")
+            print(f"  - text: {text[:50]}...")
+            print(f"  - text_language: {text_language}")
             
             # 生成音频 - get_tts_wav 返回一个生成器
             result_generator = get_tts_wav(
@@ -492,7 +548,12 @@ class MeditationApp:
                 pause_second=pause_second
             )
             
-            print(f"get_tts_wav返回结果类型: {type(result_generator)}")
+            print(f"[DEBUG] get_tts_wav返回结果类型: {type(result_generator)}")
+            
+            if result_generator is None:
+                print("[ERROR] get_tts_wav返回None")
+                gr.Error("音频生成失败：返回空结果")
+                return None
             
             # 处理生成器返回的音频
             audio_segments = []
@@ -508,22 +569,33 @@ class MeditationApp:
                 estimated_segments = 1
             
             # 迭代生成器获取音频
-            for sr, audio in result_generator:
-                segment_count += 1
-                progress_val = 0.3 + (0.6 * segment_count / max(estimated_segments, segment_count))
-                progress(progress_val, desc=f"正在生成音频片段 {segment_count}/{estimated_segments}...")
-                
-                print(f"生成音频片段 #{segment_count}: 采样率={sr}, 音频形状={audio.shape if hasattr(audio, 'shape') else 'N/A'}")
-                audio_segments.append((sr, audio))
+            print("[DEBUG] 开始迭代生成器...")
+            try:
+                for sr, audio in result_generator:
+                    segment_count += 1
+                    if progress:
+                        progress_val = 0.3 + (0.6 * segment_count / max(estimated_segments, segment_count))
+                        progress(progress_val, desc=f"正在生成音频片段 {segment_count}/{estimated_segments}...")
+                    
+                    print(f"[DEBUG] 生成音频片段 #{segment_count}: 采样率={sr}, 音频形状={audio.shape if hasattr(audio, 'shape') else 'N/A'}")
+                    audio_segments.append((sr, audio))
+            except Exception as e:
+                print(f"[ERROR] 迭代生成器时出错: {type(e).__name__}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                gr.Error(f"处理音频时出错: {str(e)}")
+                return None
             
             if audio_segments:
-                progress(0.9, desc="正在合并音频...")
+                if progress:
+                    progress(0.9, desc="正在合并音频...")
                 
                 # 如果只有一个片段，直接返回
                 if len(audio_segments) == 1:
                     sr, audio = audio_segments[0]
-                    print(f"生成单个音频成功: 采样率={sr}")
-                    progress(1.0, desc="生成完成！")
+                    print(f"[SUCCESS] 生成单个音频成功: 采样率={sr}, 形状={audio.shape}")
+                    if progress:
+                        progress(1.0, desc="生成完成！")
                     return (sr, audio)
                 
                 # 如果有多个片段，合并它们
@@ -538,9 +610,10 @@ class MeditationApp:
                 
                 # 合并所有音频片段
                 merged_audio = np.concatenate(all_audio)
-                print(f"合并 {len(audio_segments)} 个音频片段，总长度: {merged_audio.shape}")
+                print(f"[SUCCESS] 合并 {len(audio_segments)} 个音频片段，总长度: {merged_audio.shape}")
                 
-                progress(1.0, desc="生成完成！")
+                if progress:
+                    progress(1.0, desc="生成完成！")
                 return (sr, merged_audio)
             else:
                 print("get_tts_wav未返回任何音频数据")
@@ -548,9 +621,11 @@ class MeditationApp:
                 return None
                 
         except Exception as e:
-            print(f"音频生成异常: {type(e).__name__}: {str(e)}")
+            print(f"[CRITICAL ERROR] 音频生成异常: {type(e).__name__}: {str(e)}")
             import traceback
+            print("[TRACEBACK]:")
             traceback.print_exc()
+            print("="*60)
             gr.Error(f"音频生成失败：{str(e)}")
             return None
     
@@ -778,9 +853,32 @@ class MeditationApp:
                     ]
                 )
                 
-                # 生成按钮事件
+                # 生成按钮事件 - 添加调试信息
+                def generate_wrapper(*args, progress=gr.Progress()):
+                    """包装函数，用于调试"""
+                    print("\n" + "="*60)
+                    print("[BUTTON CLICK] 生成按钮被点击！")
+                    print(f"[BUTTON CLICK] 收到 {len(args)} 个参数")
+                    for i, arg in enumerate(args):
+                        if isinstance(arg, str) and len(arg) > 100:
+                            print(f"  参数 {i}: {type(arg).__name__} = {arg[:100]}...")
+                        else:
+                            print(f"  参数 {i}: {type(arg).__name__} = {arg}")
+                    print("="*60)
+                    
+                    try:
+                        # 调用实际的生成函数，传递progress参数
+                        result = self.generate_audio(*args, progress=progress)
+                        print(f"[BUTTON CLICK] 生成完成，返回类型: {type(result)}")
+                        return result
+                    except Exception as e:
+                        print(f"[BUTTON CLICK ERROR] {type(e).__name__}: {str(e)}")
+                        import traceback
+                        traceback.print_exc()
+                        raise
+                
                 generate_btn.click(
-                    fn=self.generate_audio,
+                    fn=generate_wrapper,
                     inputs=[
                         text_input,
                         ref_audio_input,
@@ -797,7 +895,8 @@ class MeditationApp:
                         sovits_dropdown,
                         gpt_dropdown
                     ],
-                    outputs=[audio_output]
+                    outputs=[audio_output],
+                    show_progress=True
                 )
             
             return app
