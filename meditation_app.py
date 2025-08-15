@@ -427,7 +427,8 @@ class MeditationApp:
         ref_language: str,
         how_to_cut: str,
         sovits_model: str,
-        gpt_model: str
+        gpt_model: str,
+        progress=gr.Progress()
     ):
         """生成冥想音频"""
         
@@ -454,6 +455,9 @@ class MeditationApp:
             return None
         
         try:
+            # 显示进度
+            progress(0.1, desc="正在加载模型...")
+            
             # 更新模型（如果需要）
             if sovits_model and sovits_model != self.current_sovits:
                 print(f"切换SoVITS模型: {self.current_sovits} -> {sovits_model}")
@@ -465,10 +469,11 @@ class MeditationApp:
                 change_gpt_weights(gpt_model)
                 self.current_gpt = gpt_model
             
+            progress(0.3, desc="正在生成音频...")
             print("开始调用get_tts_wav函数...")
             
-            # 生成音频
-            result = get_tts_wav(
+            # 生成音频 - get_tts_wav 返回一个生成器
+            result_generator = get_tts_wav(
                 ref_wav_path=ref_audio,
                 prompt_text=ref_text,
                 prompt_language=ref_language,
@@ -487,15 +492,58 @@ class MeditationApp:
                 pause_second=pause_second
             )
             
-            print(f"get_tts_wav返回结果类型: {type(result)}")
+            print(f"get_tts_wav返回结果类型: {type(result_generator)}")
             
-            # 返回生成的音频
-            if result:
-                for sr, audio in result:
-                    print(f"生成音频成功: 采样率={sr}, 音频形状={audio.shape if hasattr(audio, 'shape') else 'N/A'}")
-                    return (sr, audio)
+            # 处理生成器返回的音频
+            audio_segments = []
+            segment_count = 0
+            
+            # 计算文本切分数量来估算进度
+            import re
+            if "按中文句号。切" in how_to_cut:
+                estimated_segments = len(re.split('[。！？]', text))
+            elif "按英文句号.切" in how_to_cut:
+                estimated_segments = len(re.split('[.!?]', text))
             else:
-                print("get_tts_wav返回了空结果")
+                estimated_segments = 1
+            
+            # 迭代生成器获取音频
+            for sr, audio in result_generator:
+                segment_count += 1
+                progress_val = 0.3 + (0.6 * segment_count / max(estimated_segments, segment_count))
+                progress(progress_val, desc=f"正在生成音频片段 {segment_count}/{estimated_segments}...")
+                
+                print(f"生成音频片段 #{segment_count}: 采样率={sr}, 音频形状={audio.shape if hasattr(audio, 'shape') else 'N/A'}")
+                audio_segments.append((sr, audio))
+            
+            if audio_segments:
+                progress(0.9, desc="正在合并音频...")
+                
+                # 如果只有一个片段，直接返回
+                if len(audio_segments) == 1:
+                    sr, audio = audio_segments[0]
+                    print(f"生成单个音频成功: 采样率={sr}")
+                    progress(1.0, desc="生成完成！")
+                    return (sr, audio)
+                
+                # 如果有多个片段，合并它们
+                import numpy as np
+                sr = audio_segments[0][0]  # 使用第一个片段的采样率
+                all_audio = []
+                
+                for seg_sr, seg_audio in audio_segments:
+                    if seg_sr != sr:
+                        print(f"警告: 采样率不一致 {seg_sr} != {sr}")
+                    all_audio.append(seg_audio)
+                
+                # 合并所有音频片段
+                merged_audio = np.concatenate(all_audio)
+                print(f"合并 {len(audio_segments)} 个音频片段，总长度: {merged_audio.shape}")
+                
+                progress(1.0, desc="生成完成！")
+                return (sr, merged_audio)
+            else:
+                print("get_tts_wav未返回任何音频数据")
                 gr.Warning("音频生成失败：未返回音频数据")
                 return None
                 
